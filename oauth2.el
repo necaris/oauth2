@@ -68,7 +68,7 @@ MSG is a list of format string and arguments passed to `message'."
 
 (defun oauth2--current-timestamp ()
   "Return the current time in Emacs internal time format."
-  (current-time))
+  (time-convert (current-time) 'integer))
 
 (defun oauth2--build-url-param-str (&rest data)
   "Build URL data string with values in DATA.
@@ -123,9 +123,8 @@ RFC7636 for more details."
 Returns a base64url-encoded SHA256 hash of CODE-VERIFIER."
   ;; base64url-encode-string returns a string that ends with '=' so the last
   ;; character should be skipped.
-  (substring (base64url-encode-string (secure-hash 'sha256
-                                                   code-verifier
-                                                   nil nil t))
+  (substring (base64url-encode-string
+              (secure-hash 'sha256 code-verifier nil nil t))
              0 -1))
 
 (defun oauth2-request-authorization (auth-url client-id &optional scope state redirect-uri user-name code-verifier no-auto-open)
@@ -157,7 +156,7 @@ Return the authorization code provided by the service."
       (oauth2--do-debug "[%s]: url: %s" func-name url)
       (if (not no-auto-open)
           (browse-url url))
-      (read-string (format "Follow the instruction on your default browser, or visit:\n\n%s\nEnter the code your browser displayed: " url)))))
+      (read-string (format "Follow the instruction on your default browser, or visit:\n\n%s\n\nEnter the code your browser displayed: " url)))))
 
 (defun oauth2-request-access-parse ()
   "Parse the result of an OAuth request."
@@ -193,8 +192,8 @@ Return the authorization code provided by the service."
   token-url
   access-response)
 
-(defun oauth2-request-access (token-url client-id client-secret code &optional redirect-uri host-name code-verifier)
-  "Request OAuth access at TOKEN-URL.
+(defun oauth2-request-access (auth-url token-url client-id client-secret code &optional redirect-uri host-name code-verifier)
+  "Request OAuth access at TOKEN-URL, via AUTH-URL.
 CLIENT-ID and CLIENT-SECRET identify the application.
 The CODE should be obtained with `oauth2-request-authorization'.
 Optional REDIRECT-URI should match the one used in authorization.
@@ -205,20 +204,24 @@ when it was already provided during authorization.
 Return an `oauth2-token' structure."
   (when code
     (let* ((request-timestamp (oauth2--current-timestamp))
+           (code-and-state (string-split code "#" t))  ;; this is the way Anthropic does it, at least
+           (code (nth 0 code-and-state))
+           (state (nth 1 code-and-state))
            (access-response (oauth2-make-access-request
                              token-url
                              (oauth2--build-url-param-str
                               "client_id" client-id
                               "client_secret" client-secret
                               "code" code
+                              "state" state
                               "code_verifier" code-verifier
-                              "redirect_uri" (or redirect-uri
-                                                 oauth2--default-redirect-uri)
+                              "redirect_uri" (or redirect-uri oauth2--default-redirect-uri)
                               "grant_type" "authorization_code"))))
       (make-oauth2-token :client-id client-id
                          :client-secret client-secret
                          :access-token (cdr (assoc 'access_token access-response))
                          :refresh-token (cdr (assoc 'refresh_token access-response))
+                         :request-timestamp request-timestamp
                          :code-verifier code-verifier
                          :auth-url auth-url
                          :token-url token-url
@@ -254,6 +257,8 @@ Updates the TOKEN in-place with the new access token and returns it."
                          ,(oauth2-token-refresh-token token)
                          :access-response
                          ,(oauth2-token-access-response token)
+                         :request-timestamp
+                         ,(oauth2-token-request-timestamp token)
                          ))
       (plstore-save plstore)))
   token)
@@ -270,14 +275,15 @@ Optional REDIRECT-URI specifies where to redirect after authorization.
 Optional USER-NAME provides a login hint for the authorization page.
 Optional HOST-NAME is currently unused.
 Optional CODE-VERIFIER enables PKCE (Proof Key for Code Exchange).
+Optional NO-AUTO-OPEN suppresses automatic browser launch.
 
 Return an `oauth2-token' structure."
   (oauth2-request-access
+   auth-url
    token-url
    client-id
    client-secret
-   (oauth2-request-authorization
-    auth-url client-id scope state redirect-uri user-name code-verifier no-auto-open)
+   (oauth2-request-authorization auth-url client-id scope state redirect-uri user-name code-verifier no-auto-open)
    redirect-uri
    host-name
    code-verifier))
@@ -287,25 +293,34 @@ Return an `oauth2-token' structure."
   :group 'oauth2
   :type 'file)
 
+(defun oauth2--toggle-url-http-handle-authentication-advice (enable)
+  "ENABLE or disable the advice on `url-http-handle-authentication'."
+  (if enable
+      (advice-add 'url-http-handle-authentication :around #'oauth2--url-http-handle-authentication-hack)
+    (advice-remove 'url-http-handle-authentication #'oauth2--url-http-handle-authentication-hack)))
+
+(defcustom oauth2-use-url-http-handle-authentication-advice t
+  "Use `url-http-handle-authentication' advice for authentication.
+This is the legacy implementation for handling authentication.  Disabling
+this may be necessary if it interferes with other packages."
+  :group 'oauth2
+  :type 'boolean
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (oauth2--toggle-url-http-handle-authentication-advice value)))
+
 (defun oauth2-compute-id (auth-url token-url scope client-id user-name)
   "Compute a unique id mainly to use as plstore id.
 The result is computed using AUTH-URL, TOKEN-URL, SCOPE, CLIENT-ID, and
 USER-NAME to ensure the plstore id is unique."
   (secure-hash 'sha512 (concat auth-url token-url scope client-id user-name)))
 
-(oauth2-auth-and-store
- "https://claude.ai/oauth/authorize"            ;; auth-url
- "https://console.anthropic.com/v1/oauth/token" ;; token-url
- "org:create_api_key user:profile user:inference"                                ;; scope
- "9d1c250a-e61b-44d9-88ed-5944d1962f5e" ;; client-id
- "" ;; client-secret
- "https://console.anthropic.com/oauth/code/callback" ;; redirect-uri
- (oauth2--generate-code-verifier 24) ;; state
- nil ;; user-name
- "console.anthropic.com"  ;; host-name
- t ;; use-pkce
- t ;; no-auto-open
- )
+(defun oauth2-token-expired-p (token)
+  "Return non-nil if TOKEN is expired."
+  (let* ((response (oauth2-token-access-response token))
+         (expires-in (or (cdr (assoc 'expires_in response)) 3600))
+         (request-time (oauth2-token-request-timestamp token)))
+    (> (oauth2--current-timestamp) (+ request-time expires-in))))
 
 ;;;###autoload
 (defun oauth2-auth-and-store (auth-url token-url scope client-id client-secret &optional redirect-uri state user-name host-name use-pkce no-auto-open)
@@ -331,20 +346,27 @@ Return an `oauth2-token' structure."
     ;; Check if we found something matching this access
     (if plist
         ;; We did, return the token object
-        (make-oauth2-token :plstore plstore
-                           :plstore-id id
-                           :client-id client-id
-                           :client-secret client-secret
-                           :access-token (plist-get plist :access-token)
-                           :refresh-token (plist-get plist :refresh-token)
-                           :code-verifier (plist-get plist :code-verifier)
-                           :token-url token-url
-                           :access-response (plist-get plist :access-response))
+        (let ((token (make-oauth2-token :plstore plstore
+                                        :plstore-id id
+                                        :client-id client-id
+                                        :client-secret client-secret
+                                        :access-token (plist-get plist :access-token)
+                                        :refresh-token (plist-get plist :refresh-token)
+                                        :request-timestamp (plist-get plist :request-timestamp)
+                                        :code-verifier (plist-get plist :code-verifier)
+                                        :token-url token-url
+                                        :auth-url (or (plist-get plist :auth-url) auth-url)
+                                        :access-response (plist-get plist :access-response))))
+          (when (oauth2-token-expired-p token)
+            (oauth2--do-debug "Token expired, refreshing")
+            (oauth2-refresh-access token))
+          token)
       (let* ((code-verifier (if use-pkce
                                 (oauth2--generate-code-verifier)
                               ""))
              (token (oauth2-auth auth-url token-url client-id client-secret scope state redirect-uri user-name host-name code-verifier no-auto-open)))
         ;; Set the plstore
+        (oauth2--do-debug "token: [%s]" token)
         (setf (oauth2-token-plstore token) plstore)
         (setf (oauth2-token-plstore-id token) id)
         (plstore-put plstore id nil `(:access-token
@@ -353,6 +375,10 @@ Return an `oauth2-token' structure."
                                       ,(oauth2-token-code-verifier token)
                                       :refresh-token
                                       ,(oauth2-token-refresh-token token)
+                                      :request-timestamp
+                                      ,(oauth2-token-request-timestamp token)
+                                      :auth-url
+                                      ,(oauth2-token-auth-url token)
                                       :access-response
                                       ,(oauth2-token-access-response token)))
         (plstore-save plstore)
@@ -381,6 +407,9 @@ Return an `oauth2-token' structure."
 
 ;; FIXME: We should change URL so that this can be done without an advice.
 (defun oauth2--url-http-handle-authentication-hack (orig-fun &rest args)
+  "Advise `url-http-hande-authentication' to refresh access tokens.
+
+If `oauth--url-advice' is nil, just pass through to ORIG-FUN with ARGS."
   (if (not oauth--url-advice)
       (apply orig-fun args)
     (let ((url-request-method url-http-method)
@@ -394,8 +423,7 @@ Return an `oauth2-token' structure."
       ;; This is to make `url' think it's done.
       (when (boundp 'success) (setq success t)) ;For URL library in Emacs<24.4.
       t)))                                      ;For URL library in Emacs≥24.4.
-(advice-add 'url-http-handle-authentication :around
-            #'oauth2--url-http-handle-authentication-hack)
+(oauth2--toggle-url-http-handle-authentication-advice oauth2-use-url-http-handle-authentication-advice)
 
 ;;;###autoload
 (defun oauth2-url-retrieve-synchronously (token url &optional request-method request-data request-extra-headers)
