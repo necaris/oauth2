@@ -56,10 +56,12 @@
 (defvar oauth2-debug nil
   "Enable verbose logging in oauth2 to help debugging.")
 
-(defvar oauth2--default-redirect-uri "urn:ietf:wg:oauth:2.0:oob")
+(defvar oauth2--default-redirect-uri "urn:ietf:wg:oauth:2.0:oob"
+  "Default redirect URI for OAuth2 authorization.")
 
 (defun oauth2--do-debug (&rest msg)
-  "Output debug messages when `oauth2-debug' is enabled."
+  "Output debug messages when `oauth2-debug' is enabled.
+MSG is a list of format string and arguments passed to `message'."
   (when oauth2-debug
     (setcar msg (concat "[oauth2] " (car msg)))
     (apply #'message msg)))
@@ -70,9 +72,8 @@
 
 (defun oauth2--build-url-param-str (&rest data)
   "Build URL data string with values in DATA.
-DATA should be a list of attribute name and value one by one, therefore
-the length should be a multply of 2 or it will assert fail.  Each value
-will be hexified to be URL-safe.  If a value is not a string or an empty
+DATA should be a list of attribute name and value pairs -- each value will
+be hexified to be URL-safe.  If a value is not a string or an empty
 string, this pair of key value will be skipped.
 
 Return a URL-safe string of parameter data."
@@ -93,8 +94,8 @@ Return a URL-safe string of parameter data."
   "Build a URL string with ADDRESS and DATA.
 DATA can be a string or an alist of attributes.  If it is a string, it
 will be encoded; if it is an alist it will be converted to a URL-safe
-string using oauth2--build-url-param-str.  It will then be combined with
-address to build the full URL."
+string using `oauth2--build-url-param-str'.  It will then be combined with
+ADDRESS to build the full URL."
   (let ((data-str (progn
                     (if (> (length data) 1)
                         (apply 'oauth2--build-url-param-str
@@ -105,7 +106,7 @@ address to build the full URL."
 (defun oauth2--generate-code-verifier (&optional verifier-length)
   "Generate a random string of VERIFIER-LENGTH long for code_challenge.
 The string should be of length 43 to 128 (inclusive).  If
-VERIFIER-LENGTH is nil, we default to 90 as mutt_oauth2.py did.  See
+VERIFIER-LENGTH is nil, default to 90 as mutt_oauth2.py did.  See
 RFC7636 for more details."
   (let* ((func-name "oauth2--generate-code-verifier")
          (valid-chars
@@ -118,7 +119,8 @@ RFC7636 for more details."
     (base64url-encode-string (string-join result-list))))
 
 (defun oauth2--get-challenge-from-verifier (code-verifier)
-  "Get the code_challenge from CODE-VERIFIER."
+  "Get the code_challenge from CODE-VERIFIER.
+Returns a base64url-encoded SHA256 hash of CODE-VERIFIER."
   ;; base64url-encode-string returns a string that ends with '=' so the last
   ;; character should be skipped.
   (substring (base64url-encode-string (secure-hash 'sha256
@@ -129,9 +131,14 @@ RFC7636 for more details."
 (defun oauth2-request-authorization (auth-url client-id &optional scope state redirect-uri user-name code-verifier)
   "Request OAuth authorization at AUTH-URL by launching `browse-url'.
 CLIENT-ID is the client id provided by the provider.
-It returns the code provided by the service. USER-NAME is used to
-provide the login_hint which will fill the login user name on the
-requesting webpage to save users some typing. "
+Optional SCOPE specifies the access scope requested.
+Optional STATE provides additional security against CSRF attacks.
+Optional REDIRECT-URI specifies where to redirect after authorization.
+Optional USER-NAME is used to provide the login_hint which will fill
+the login user name on the requesting webpage to save users some typing.
+Optional CODE-VERIFIER enables PKCE (Proof Key for Code Exchange).
+
+Return the authorization code provided by the service."
   (let* ((func-name "oauth2-request-authorization")
          (url-params (list "client_id" client-id
                            "response_type" "code"
@@ -160,7 +167,7 @@ requesting webpage to save users some typing. "
     (json-read)))
 
 (defun oauth2-make-access-request (url data)
-  "Make an access request to URL using DATA in POST."
+  "Make an access request to URL using DATA, returning parsed JSON response."
   (let ((func-name (nth 1 (backtrace-frame 3))))
     (oauth2--do-debug "%s: url: %s" func-name url)
     (oauth2--do-debug "%s: data: %s" func-name data)
@@ -189,10 +196,14 @@ requesting webpage to save users some typing. "
 
 (defun oauth2-request-access (token-url client-id client-secret code &optional redirect-uri host-name code-verifier)
   "Request OAuth access at TOKEN-URL.
+CLIENT-ID and CLIENT-SECRET identify the application.
 The CODE should be obtained with `oauth2-request-authorization'.
-Return an `oauth2-token' structure.
-CODE-VERIFIER is used for the PKCE extension and is required
-+when it was already provided during authorization. "
+Optional REDIRECT-URI should match the one used in authorization.
+Optional HOST-NAME is currently unused.
+Optional CODE-VERIFIER is used for the PKCE extension and is required
+when it was already provided during authorization.
+
+Return an `oauth2-token' structure."
   (when code
     (let* ((request-timestamp (oauth2--current-timestamp))
            (access-response (oauth2-make-access-request
@@ -217,7 +228,9 @@ CODE-VERIFIER is used for the PKCE extension and is required
 ;;;###autoload
 (defun oauth2-refresh-access (token &optional host-name)
   "Refresh OAuth access TOKEN.
-TOKEN should be obtained with `oauth2-request-access'."
+TOKEN should be obtained with `oauth2-request-access'.
+Optional HOST-NAME is currently unused.
+Updates the TOKEN in-place with the new access token and returns it."
   (let* ((client-id (oauth2-token-client-id token))
          (client-secret (oauth2-token-client-secret token))
          (refresh-token (oauth2-token-refresh-token token))
@@ -248,7 +261,18 @@ TOKEN should be obtained with `oauth2-request-access'."
 
 ;;;###autoload
 (defun oauth2-auth (auth-url token-url client-id client-secret &optional scope state redirect-uri user-name host-name code-verifier)
-  "Authenticate application via OAuth2."
+  "Authenticate application via OAuth2.
+AUTH-URL is the authorization endpoint URL.
+TOKEN-URL is the token endpoint URL.
+CLIENT-ID and CLIENT-SECRET identify the application.
+Optional SCOPE specifies the access scope requested.
+Optional STATE provides additional security against CSRF attacks.
+Optional REDIRECT-URI specifies where to redirect after authorization.
+Optional USER-NAME provides a login hint for the authorization page.
+Optional HOST-NAME is currently unused.
+Optional CODE-VERIFIER enables PKCE (Proof Key for Code Exchange).
+
+Return an `oauth2-token' structure."
   (oauth2-request-access
    token-url
    client-id
@@ -260,19 +284,32 @@ TOKEN should be obtained with `oauth2-request-access'."
    code-verifier))
 
 (defcustom oauth2-token-file (locate-user-emacs-file "oauth2.plstore")
-  "File path where store OAuth tokens."
+  "File path where OAuth tokens are stored."
   :group 'oauth2
   :type 'file)
 
 (defun oauth2-compute-id (auth-url token-url scope client-id user-name)
-  "Compute an unique id mainly to use as plstore id.
+  "Compute a unique id mainly to use as plstore id.
 The result is computed using AUTH-URL, TOKEN-URL, SCOPE, CLIENT-ID, and
 USER-NAME to ensure the plstore id is unique."
   (secure-hash 'sha512 (concat auth-url token-url scope client-id user-name)))
 
 ;;;###autoload
 (defun oauth2-auth-and-store (auth-url token-url scope client-id client-secret &optional redirect-uri state user-name host-name use-pkce)
-  "Request access to a resource and store it using `plstore'."
+  "Request access to a resource and store it using `plstore'.
+AUTH-URL is the authorization endpoint URL.
+TOKEN-URL is the token endpoint URL.
+SCOPE specifies the access scope requested.
+CLIENT-ID and CLIENT-SECRET identify the application.
+Optional REDIRECT-URI specifies where to redirect after authorization.
+Optional STATE provides additional security against CSRF attacks.
+Optional USER-NAME provides a login hint for the authorization page.
+Optional HOST-NAME is currently unused.
+Optional USE-PKCE enables PKCE (Proof Key for Code Exchange).
+
+If a token already exists for these parameters, return it.
+Otherwise, perform the full OAuth2 flow and store the result.
+Return an `oauth2-token' structure."
   ;; We store a MD5 sum of all URL
   (let* ((plstore (plstore-open oauth2-token-file))
          (id (oauth2-compute-id auth-url token-url scope client-id user-name))
@@ -309,23 +346,24 @@ USER-NAME to ensure the plstore id is unique."
         token))))
 
 (defun oauth2-url-append-access-token (token url)
-  "Append access token to URL."
+  "Append access token from TOKEN to URL as a query parameter."
   (concat url
           (if (string-match-p "\?" url) "&" "?")
           "access_token=" (oauth2-token-access-token token)))
 
-(defvar oauth--url-advice nil)
-(defvar oauth--token-data)
+(defvar oauth--url-advice nil
+  "Internal variable to control oauth2 URL advice activation.")
+(defvar oauth--token-data
+  "Internal variable to store token and URL data for OAuth2 requests.")
 
 (defun oauth2-authz-bearer-header (token)
-  "Return `Authoriztions: Bearer' header with TOKEN."
+  "Return `Authorization: Bearer' header with TOKEN."
   (cons "Authorization" (format "Bearer %s" token)))
 
 (defun oauth2-extra-headers (extra-headers)
   "Return EXTRA-HEADERS with `Authorization: Bearer' added."
   (cons (oauth2-authz-bearer-header (oauth2-token-access-token (car oauth--token-data)))
         extra-headers))
-
 
 ;; FIXME: We should change URL so that this can be done without an advice.
 (defun oauth2--url-http-handle-authentication-hack (orig-fun &rest args)
@@ -347,8 +385,13 @@ USER-NAME to ensure the plstore id is unique."
 
 ;;;###autoload
 (defun oauth2-url-retrieve-synchronously (token url &optional request-method request-data request-extra-headers)
-  "Retrieve an URL synchronously using TOKEN to access it.
-TOKEN can be obtained with `oauth2-auth'."
+  "Retrieve URL synchronously using TOKEN to access it.
+TOKEN can be obtained with `oauth2-auth'.
+Optional REQUEST-METHOD specifies the HTTP method (default GET).
+Optional REQUEST-DATA specifies data to send in the request body.
+Optional REQUEST-EXTRA-HEADERS specifies additional HTTP headers.
+
+Return the buffer containing the response."
   (let* ((oauth--token-data (cons token url)))
     (let ((oauth--url-advice t)         ;Activate our advice.
           (url-request-method request-method)
@@ -358,12 +401,13 @@ TOKEN can be obtained with `oauth2-auth'."
       (url-retrieve-synchronously url))))
 
 ;;;###autoload
-(defun oauth2-url-retrieve (token url callback &optional
-                                  cbargs
-                                  request-method request-data request-extra-headers)
-  "Retrieve an URL asynchronously using TOKEN to access it.
-TOKEN can be obtained with `oauth2-auth'.  CALLBACK gets called with CBARGS
-when finished.  See `url-retrieve'."
+(defun oauth2-url-retrieve (token url callback &optional cbargs request-method request-data request-extra-headers)
+  "Retrieve URL asynchronously using TOKEN to access it.
+TOKEN can be obtained with `oauth2-auth'.
+CALLBACK gets called with CBARGS when finished.  See `url-retrieve'.
+Optional REQUEST-METHOD specifies the HTTP method (default GET).
+Optional REQUEST-DATA specifies data to send in the request body.
+Optional REQUEST-EXTRA-HEADERS specifies additional HTTP headers."
   ;; TODO add support for SILENT and INHIBIT-COOKIES.  How to handle this in `url-http-handle-authentication'.
   (let* ((oauth--token-data (cons token url)))
     (let ((oauth--url-advice t)         ;Activate our advice.
