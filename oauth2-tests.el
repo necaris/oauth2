@@ -38,18 +38,15 @@
   ;; Using pre-generated code-verifier values from mutt_oauth2.py for testing.
   (let ((test-cases
          '((:verifier
-
             "nDe_cq5hGQC6-_OUhE4Y3jVdrPmRVvzSRuNci4efeXeHBiGSqAmVbzMioNMwD1fQn96IL2mChFBzhv2kI02kHNTU1tHI2T9tWn5_Lp9rqy3fGR90WYxYXGKz"
-            :challenge "hqvORBgWMedJHg2HnNs7DcRjEnVuk7gGQi9iBcp7PRs"
-            (:verifier
-             "WItNqcP9W_HFOZV__P5FgYKlbkTOBolU0jWMMIiTTh6rcG3TyoRtV4Ozx7nIJhowhjAjt41gmHwuKgxGhtv1k_5XDj52udYwHdSgqUrmkvhaqYgLADAp7rrf"
-             :challenge "lB2AKQFg6caqfa3u0cnxXihnU69vvGG1cUPRi8_cvpE")))
-         (expected-challenge-length 43)))
+            :challenge "hqvORBgWMedJHg2HnNs7DcRjEnVuk7gGQi9iBcp7PRs")
+           (:verifier
+            "WItNqcP9W_HFOZV__P5FgYKlbkTOBolU0jWMMIiTTh6rcG3TyoRtV4Ozx7nIJhowhjAjt41gmHwuKgxGhtv1k_5XDj52udYwHdSgqUrmkvhaqYgLADAp7rrf"
+            :challenge "lB2AKQFg6caqfa3u0cnxXihnU69vvGG1cUPRi8_cvpE")))
+        (expected-challenge-length 43))
     (dolist (test-case test-cases)
-      (let* ((verifier (plist-get test-case :verifier
-                                  (challenge (oauth2--get-challenge-from-verifier verifier))
-                                  (expected-challenge (plist-get test-case :challenge)))
-                       (should (string= challenge expected-challenge))
-                       (should (= (length challenge) expected-challenge-length))))))))
-
-                                        ;
+      (let* ((verifier (plist-get test-case :verifier))
+             (challenge (oauth2--get-challenge-from-verifier verifier))
+             (expected-challenge (plist-get test-case :challenge)))
+        (should (string= challenge expected-challenge))
+        (should (= (length challenge) expected-challenge-length))))))

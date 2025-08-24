@@ -64,6 +64,10 @@
     (setcar msg (concat "[oauth2] " (car msg)))
     (apply #'message msg)))
 
+(defun oauth2--current-timestamp ()
+  "Return the current time in Emacs internal time format."
+  (current-time))
+
 (defun oauth2--build-url-param-str (&rest data)
   "Build URL data string with values in DATA.
 DATA should be a list of attribute name and value one by one, therefore
@@ -128,43 +132,26 @@ CLIENT-ID is the client id provided by the provider.
 It returns the code provided by the service. USER-NAME is used to
 provide the login_hint which will fill the login user name on the
 requesting webpage to save users some typing. "
-  (let* ((func-name "oauth2-request-authorization"))
-    (oauth2--do-trivia "[%s]: url: %s" func-name url)
-    (oauth2--do-trivia "[%s]: data: %s" func-name data)
-    (let (url (let ((param `("client_id" ,client-id
-                             "response_type" "code"
-                             "redirect_uri"
-                             ,(or redirect-uri oauth2--default-redirect-uri)
-                             "scope" ,scope
-                             "state" ,state
-                             "login_hint" ,user-name
-                             "access_type" "offline"
-                             "prompt" "consent")))
-                (when (and code-verifier
-                           (not (string-empty-p code-verifier)))
-                  (setq param (plist-put param "code_challenge"
-                                         (oauth2--get-challenge-from-verifier
-                                          code-verifier)))
-                  (setq param (plist-put param
-                                         "code_challenge_method" "S256")))
-                (add-to-list 'param auth-url)
-                (apply 'oauth2--build-url param))))
-
-    (let (url (oauth2--build-url auth-url
-                                 "client_id" client-id
-                                 "response_type" "code"
-                                 "redirect_uri"
-                                 (or redirect-uri oauth2--default-redirect-uri)
-                                 "scope" scope
-                                 "state" state
-                                 "login_hint" user-name
-                                 "access_type" "offline"
-                                 "prompt" "consent")))
-    (oauth2--do-trivia "[%s]: url: %s" func-name url)
-    (browse-url url)
-    (read-string (concat "Follow the instruction on your default browser, or "
-                         "visit:\n" url
-                         "\nEnter the code your browser displayed: "))))
+  (let* ((func-name "oauth2-request-authorization")
+         (url-params (list "client_id" client-id
+                           "response_type" "code"
+                           "redirect_uri" (or redirect-uri oauth2--default-redirect-uri)
+                           "scope" scope
+                           "state" state
+                           "login_hint" user-name
+                           "access_type" "offline"
+                           "prompt" "consent")))
+    (when (and code-verifier
+               (not (string-empty-p code-verifier)))
+      (setq url-params (append url-params
+                               (list "code_challenge" (oauth2--get-challenge-from-verifier code-verifier)
+                                     "code_challenge_method" "S256"))))
+    (let ((url (apply 'oauth2--build-url auth-url url-params)))
+      (oauth2--do-debug "[%s]: url: %s" func-name url)
+      (browse-url url)
+      (read-string (concat "Follow the instruction on your default browser, or "
+                           "visit:\n" url
+                           "\nEnter the code your browser displayed: ")))))
 
 (defun oauth2-request-access-parse ()
   "Parse the result of an OAuth request."
@@ -184,7 +171,7 @@ requesting webpage to save users some typing. "
       (with-current-buffer (url-retrieve-synchronously url)
         (let ((data (oauth2-request-access-parse)))
           (kill-buffer (current-buffer))
-          (oauth2--do-trivia "[%s]: response: %s" func-name (prin1-to-string data))
+          (oauth2--do-debug "[%s]: response: %s" func-name (prin1-to-string data))
           data)))))
 
 (cl-defstruct oauth2-token
@@ -194,8 +181,7 @@ requesting webpage to save users some typing. "
   client-secret
   access-token
   refresh-token
-  ;; request-timestamp
-  ;; request-cache
+  request-timestamp
   code-verifier
   auth-url
   token-url
@@ -244,7 +230,7 @@ TOKEN should be obtained with `oauth2-request-access'."
          (access-token (cdr (assoc 'access_token
                                    (oauth2-make-access-request
                                     token-url url-param-str)))))
-    (setf (oauth2-token-request-timestamp token) current-timestamp)
+    (setf (oauth2-token-request-timestamp token) (oauth2--current-timestamp))
     (setf (oauth2-token-access-token token) access-token))
   ;; If the token has a plstore, update it
   (let ((plstore (oauth2-token-plstore token)))
@@ -268,7 +254,7 @@ TOKEN should be obtained with `oauth2-request-access'."
    client-id
    client-secret
    (oauth2-request-authorization
-    auth-url client-id scope state redirect-uri user-name host-name code-verifier)
+    auth-url client-id scope state redirect-uri user-name code-verifier)
    redirect-uri
    host-name
    code-verifier))
@@ -289,7 +275,7 @@ USER-NAME to ensure the plstore id is unique."
   "Request access to a resource and store it using `plstore'."
   ;; We store a MD5 sum of all URL
   (let* ((plstore (plstore-open oauth2-token-file))
-         (id (oauth2-compute-id auth-url token-url scope client-id))
+         (id (oauth2-compute-id auth-url token-url scope client-id user-name))
          (plist (cdr (plstore-get plstore id))))
     ;; Check if we found something matching this access
     (if plist
@@ -300,7 +286,7 @@ USER-NAME to ensure the plstore id is unique."
                            :client-secret client-secret
                            :access-token (plist-get plist :access-token)
                            :refresh-token (plist-get plist :refresh-token)
-                           :code-verifier code-verifier
+                           :code-verifier (plist-get plist :code-verifier)
                            :token-url token-url
                            :access-response (plist-get plist :access-response))
       (let* ((code-verifier (if use-pkce
