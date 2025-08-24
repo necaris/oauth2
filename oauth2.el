@@ -128,15 +128,15 @@ Returns a base64url-encoded SHA256 hash of CODE-VERIFIER."
                                                    nil nil t))
              0 -1))
 
-(defun oauth2-request-authorization (auth-url client-id &optional scope state redirect-uri user-name code-verifier)
+(defun oauth2-request-authorization (auth-url client-id &optional scope state redirect-uri user-name code-verifier no-auto-open)
   "Request OAuth authorization at AUTH-URL by launching `browse-url'.
 CLIENT-ID is the client id provided by the provider.
 Optional SCOPE specifies the access scope requested.
 Optional STATE provides additional security against CSRF attacks.
 Optional REDIRECT-URI specifies where to redirect after authorization.
-Optional USER-NAME is used to provide the login_hint which will fill
-the login user name on the requesting webpage to save users some typing.
+Optional USER-NAME is used to provide the login_hint which will fill the login user name on the requesting webpage to save users some typing.
 Optional CODE-VERIFIER enables PKCE (Proof Key for Code Exchange).
+Optional NO-AUTO-OPEN disables automatically opening the browser.
 
 Return the authorization code provided by the service."
   (let* ((func-name "oauth2-request-authorization")
@@ -155,10 +155,9 @@ Return the authorization code provided by the service."
                                      "code_challenge_method" "S256"))))
     (let ((url (apply 'oauth2--build-url auth-url url-params)))
       (oauth2--do-debug "[%s]: url: %s" func-name url)
-      (browse-url url)
-      (read-string (concat "Follow the instruction on your default browser, or "
-                           "visit:\n" url
-                           "\nEnter the code your browser displayed: ")))))
+      (if (not no-auto-open)
+          (browse-url url))
+      (read-string (format "Follow the instruction on your default browser, or visit:\n\n%s\nEnter the code your browser displayed: " url)))))
 
 (defun oauth2-request-access-parse ()
   "Parse the result of an OAuth request."
@@ -260,7 +259,7 @@ Updates the TOKEN in-place with the new access token and returns it."
   token)
 
 ;;;###autoload
-(defun oauth2-auth (auth-url token-url client-id client-secret &optional scope state redirect-uri user-name host-name code-verifier)
+(defun oauth2-auth (auth-url token-url client-id client-secret &optional scope state redirect-uri user-name host-name code-verifier no-auto-open)
   "Authenticate application via OAuth2.
 AUTH-URL is the authorization endpoint URL.
 TOKEN-URL is the token endpoint URL.
@@ -278,7 +277,7 @@ Return an `oauth2-token' structure."
    client-id
    client-secret
    (oauth2-request-authorization
-    auth-url client-id scope state redirect-uri user-name code-verifier)
+    auth-url client-id scope state redirect-uri user-name code-verifier no-auto-open)
    redirect-uri
    host-name
    code-verifier))
@@ -294,8 +293,22 @@ The result is computed using AUTH-URL, TOKEN-URL, SCOPE, CLIENT-ID, and
 USER-NAME to ensure the plstore id is unique."
   (secure-hash 'sha512 (concat auth-url token-url scope client-id user-name)))
 
+(oauth2-auth-and-store
+ "https://claude.ai/oauth/authorize"            ;; auth-url
+ "https://console.anthropic.com/v1/oauth/token" ;; token-url
+ "org:create_api_key user:profile user:inference"                                ;; scope
+ "9d1c250a-e61b-44d9-88ed-5944d1962f5e" ;; client-id
+ "" ;; client-secret
+ "https://console.anthropic.com/oauth/code/callback" ;; redirect-uri
+ (oauth2--generate-code-verifier 24) ;; state
+ nil ;; user-name
+ "console.anthropic.com"  ;; host-name
+ t ;; use-pkce
+ t ;; no-auto-open
+ )
+
 ;;;###autoload
-(defun oauth2-auth-and-store (auth-url token-url scope client-id client-secret &optional redirect-uri state user-name host-name use-pkce)
+(defun oauth2-auth-and-store (auth-url token-url scope client-id client-secret &optional redirect-uri state user-name host-name use-pkce no-auto-open)
   "Request access to a resource and store it using `plstore'.
 AUTH-URL is the authorization endpoint URL.
 TOKEN-URL is the token endpoint URL.
@@ -306,6 +319,7 @@ Optional STATE provides additional security against CSRF attacks.
 Optional USER-NAME provides a login hint for the authorization page.
 Optional HOST-NAME is currently unused.
 Optional USE-PKCE enables PKCE (Proof Key for Code Exchange).
+Optional NO-AUTO-OPEN suppresses automatically opening the browser.
 
 If a token already exists for these parameters, return it.
 Otherwise, perform the full OAuth2 flow and store the result.
@@ -329,8 +343,7 @@ Return an `oauth2-token' structure."
       (let* ((code-verifier (if use-pkce
                                 (oauth2--generate-code-verifier)
                               ""))
-             (token (oauth2-auth auth-url token-url
-                                 client-id client-secret scope state redirect-uri user-name host-name code-verifier)))
+             (token (oauth2-auth auth-url token-url client-id client-secret scope state redirect-uri user-name host-name code-verifier no-auto-open)))
         ;; Set the plstore
         (setf (oauth2-token-plstore token) plstore)
         (setf (oauth2-token-plstore-id token) id)
@@ -353,6 +366,7 @@ Return an `oauth2-token' structure."
 
 (defvar oauth--url-advice nil
   "Internal variable to control oauth2 URL advice activation.")
+
 (defvar oauth--token-data
   "Internal variable to store token and URL data for OAuth2 requests.")
 
